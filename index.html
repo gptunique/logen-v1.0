@@ -1,0 +1,252 @@
+
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <title>로젠택배 대량 송장 자동조회기</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- [엑셀] Excel(XLSX) 기능 추가 -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+</head>
+<body class="bg-slate-100 min-h-screen">
+
+<script>
+  const WORKER_URL = "https://logen-api.gpt00unique.workers.dev/track";
+</script>
+
+  <div class="max-w-4xl mx-auto p-6">
+    <h1 class="text-2xl font-bold mb-4">로젠택배 대량 송장 자동조회</h1>
+
+    <div class="bg-white shadow rounded-lg p-4 mb-4">
+      <label class="font-semibold">송장번호 다량 입력</label>
+      <textarea id="bulkInput"
+        class="w-full h-32 border rounded p-2 font-mono text-sm mt-2"
+        placeholder="상도야 송장여러개입력시 줄바꿈 또는 쉼표로 입력해라"></textarea>
+
+      <div class="flex gap-2 mt-3">
+        <button id="btnNormalize" class="px-3 py-1.5 bg-slate-200 rounded hover:bg-slate-300">
+          정리/중복제거
+        </button>
+        <button id="btnSample" class="px-3 py-1.5 bg-slate-200 rounded hover:bg-slate-300">
+          샘플 넣기
+        </button>
+        <button id="btnQuery" class="px-4 py-1.5 bg-blue-600 text-white rounded hover:bg-blue-700">
+          일괄조회
+        </button>
+      </div>
+
+      <p id="statusText" class="text-sm text-slate-600 mt-2"></p>
+    </div>
+
+    <div class="bg-white shadow rounded-lg p-4">
+      <div class="flex justify-between items-center mb-2">
+        <h2 class="font-semibold">조회 결과</h2>
+
+        <!-- [버튼 영역] CSV + 엑셀 두 개 모두 여기 -->
+        <div>
+          <button id="btnExportCsv"
+            class="px-3 py-1 text-xs border rounded hover:bg-slate-100">
+            CSV로 내보내기
+          </button>
+
+          <!-- [엑셀] 엑셀로 내보내기 버튼 -->
+          <button
+            id="btnExportXlsx"
+            class="ml-2 px-3 py-1 text-xs bg-emerald-500 text-white rounded hover:bg-emerald-600"
+          >
+            엑셀로 내보내기
+          </button>
+        </div>
+      </div>
+
+      <table class="min-w-full text-xs border">
+        <thead class="bg-slate-100">
+          <tr>
+            <th class="border px-2 py-1">송장번호</th>
+            <th class="border px-2 py-1">표준상태</th>
+            <th class="border px-2 py-1">원문상태</th>
+            <th class="border px-2 py-1">최종이벤트시간</th>
+            <th class="border px-2 py-1">출발점소</th>
+            <th class="border px-2 py-1">도착점소</th>
+            <th class="border px-2 py-1">링크</th>
+            <th class="border px-2 py-1">에러</th>
+          </tr>
+        </thead>
+        <tbody id="resultBody">
+          <tr>
+            <td colspan="8" class="text-center text-slate-400 py-4">아직 조회한 결과가 없습니다.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const bulkInput     = document.getElementById('bulkInput');
+    const btnNormalize  = document.getElementById('btnNormalize');
+    const btnSample     = document.getElementById('btnSample');
+    const btnQuery      = document.getElementById('btnQuery');
+    const btnExportCsv  = document.getElementById('btnExportCsv');
+    const btnExportXlsx = document.getElementById('btnExportXlsx'); // [엑셀] 추가
+    const resultBody    = document.getElementById('resultBody');
+    const statusText    = document.getElementById('statusText');
+
+    // 마지막 조회 결과를 메모리에 저장 → CSV/엑셀 내보내기에 사용
+    let lastResult = [];
+
+    // 송장 문자열 파싱
+    function parseInvoices(text) {
+      return text.split(/[\s,]+/)
+        .map(x => x.replace(/[^0-9]/g, ''))
+        .filter(x => x.length >= 10 && x.length <= 13);
+    }
+
+    // 샘플 넣기
+    btnSample.onclick = () => {
+      bulkInput.value = "1234567890123\n1234567890124, 1234567890125";
+    };
+
+    // 정리/중복제거
+    btnNormalize.onclick = () => {
+      const arr = [...new Set(parseInvoices(bulkInput.value))];
+      bulkInput.value = arr.join("\n");
+      statusText.textContent = `정리 완료: ${arr.length}건`;
+    };
+
+    // 일괄조회
+    btnQuery.onclick = async () => {
+      const invoices = parseInvoices(bulkInput.value);
+      if (!invoices.length) {
+        alert("송장번호를 입력하세요.");
+        return;
+      }
+
+      statusText.textContent = `조회 중... (${invoices.length}건)`;
+      btnQuery.disabled = true;
+
+      try {
+        const qs  = new URLSearchParams({ invoices: invoices.join(",") });
+        const res = await fetch(`${WORKER_URL}?${qs.toString()}`);
+        if (!res.ok) throw new Error(`오류: ${res.status}`);
+
+        const json = await res.json();
+        lastResult = json;
+        renderRows(json);
+
+        const errorCount = json.filter(r => r.error).length;
+        statusText.textContent =
+          `완료: ${json.length}건 (정상 ${json.length - errorCount}건, 에러 ${errorCount}건)`;
+      } catch (e) {
+        statusText.textContent = `에러: ${e}`;
+      } finally {
+        btnQuery.disabled = false;
+      }
+    };
+
+    // 테이블 렌더링
+    function renderRows(list) {
+      if (!list.length) {
+        resultBody.innerHTML =
+          `<tr><td colspan="8" class="text-center text-slate-400 py-4">아직 조회한 결과가 없습니다.</td></tr>`;
+        return;
+      }
+
+      resultBody.innerHTML = list.map(r => `
+        <tr>
+          <td class="border px-2 py-1">${r.invoice}</td>
+          <td class="border px-2 py-1">${r.standardStatus || ""}</td>
+          <td class="border px-2 py-1">${r.rawStatus || ""}</td>
+          <td class="border px-2 py-1">${r.lastEventAt || ""}</td>
+          <td class="border px-2 py-1">${r.origin || ""}</td>
+          <td class="border px-2 py-1">${r.destination || ""}</td>
+          <td class="border px-2 py-1">
+            ${r.trackUrl ? `<a href="${r.trackUrl}" target="_blank" class="text-blue-600 underline">열기</a>` : ""}
+          </td>
+          <td class="border px-2 py-1 text-red-500 text-[11px]">${r.error || ""}</td>
+        </tr>
+      `).join("");
+    }
+
+    // CSV로 내보내기
+    btnExportCsv.onclick = () => {
+      if (!lastResult.length) {
+        alert("먼저 조회하세요.");
+        return;
+      }
+
+      const headers = [
+        "invoice",
+        "carrier",
+        "standardStatus",
+        "rawStatus",
+        "lastEventAt",
+        "origin",
+        "destination",
+        "trackUrl",
+        "error"
+      ];
+
+      const csvRows = [];
+      csvRows.push(headers.join(",")); // 헤더
+
+      for (const r of lastResult) {
+        const row = headers.map(h => {
+          const v = (r[h] ?? "").toString().replace(/"/g, '""');
+          return `"${v}"`;
+        }).join(",");
+        csvRows.push(row);
+      }
+
+      const csv  = csvRows.join("\r\n");
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      const a    = document.createElement("a");
+      a.href     = URL.createObjectURL(blob);
+      a.download = "export.csv";
+      a.click();
+    };
+
+    // [엑셀] 엑셀(XLSX)로 내보내기
+    btnExportXlsx.onclick = () => {
+      if (!lastResult.length) {
+        alert("먼저 조회하세요.");
+        return;
+      }
+
+      // 테이블 헤더 순서에 맞게 정의
+      const headers = [
+        "송장번호",
+        "표준상태",
+        "원문상태",
+        "최종이벤트시간",
+        "출발점소",
+        "도착점소",
+        "링크",
+        "에러"
+      ];
+
+      // lastResult → 2차원 배열로 변환
+      const rows = lastResult.map(r => [
+        r.invoice || "",
+        r.standardStatus || "",
+        r.rawStatus || "",
+        r.lastEventAt || "",
+        r.origin || "",
+        r.destination || "",
+        r.trackUrl || "",
+        r.error || ""
+      ]);
+
+      // 워크북/시트 생성
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+      XLSX.utils.book_append_sheet(wb, ws, "조회결과");
+
+      // 파일 이름: logen_export_YYYYMMDDHHMM.xlsx
+      const ts = new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14);
+      XLSX.writeFile(wb, `logen_export_${ts}.xlsx`);
+    };
+  </script>
+</body>
+</html>
